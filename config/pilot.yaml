@@ -1,0 +1,29 @@
+# ---------------------------------------------------------------------------
+# Pilot scope. Keep the slice SMALL enough to hand-verify every project (~30-80).
+# The pilot's job is to prove the pipeline, not to be representative.
+#
+# Recommended first slice: a small, English-language country with a mix of
+# direct (sited) and intermediated loans — easy to read, quick to validate.
+# ---------------------------------------------------------------------------
+
+slice:
+  country: "Ireland"        # portal country name; swap freely (e.g. "Portugal")
+  years: [2021, 2022, 2023, 2024]
+  sectors: []               # [] = all sectors; or e.g. ["Energy", "Transport"]
+  status: "financed"        # signed operations only
+
+paths:
+  spine_export: "data/raw/loanExport.xlsx"   # the portal export you downloaded
+  cas_benchmark: "data/raw/cas_detailed/"    # optional: annual CAS detailed lists for validation
+
+fetch:
+  contact: "research-scraper (LSE)"   # polite User-Agent label; add a contact if you wish
+  min_delay_seconds: 1.5              # be gentle with the portal
+  max_retries: 4
+  cache_dir: "data/interim/cache"
+
+harvest:
+  # Leave api_url_template empty to use the Playwright (browser) harvester.
+  # Once you find the backend XHR in DevTools, paste its URL template here to
+  # use the faster API route (see harvest_ids.py).
+  api_url_template: ""

@@ -1,0 +1,18 @@
+# core
+pandas>=2.1
+openpyxl>=3.1          # read the portal .xlsx export
+pyyaml>=6.0            # config
+tqdm>=4.66             # progress bars
+
+# fetching
+requests>=2.31
+tenacity>=8.2          # retries with backoff
+beautifulsoup4>=4.12   # parse project pages
+lxml>=5.0              # fast parser backend
+playwright>=1.44       # render the JS listing to harvest IDs  (run: playwright install chromium)
+
+# pdfs
+pdfplumber>=0.11       # extract text from ESDS / NTS PDFs
+
+# joining / fuzzy keys
+rapidfuzz>=3.6         # fuzzy match spine <-> harvested IDs

@@ -1,0 +1,20 @@
+# data & caches — never commit data to the repo
+data/raw/*
+data/interim/*
+data/processed/*
+!data/**/.gitkeep
+*.pdf
+*.xlsx
+*.csv
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.env
+.ipynb_checkpoints/
+
+# os / editor
+.DS_Store
+.vscode/
+.idea/
