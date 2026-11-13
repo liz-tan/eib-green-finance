@@ -1,111 +1,106 @@
-"""Stage 1 — harvest project numbers + URLs for the configured slice.
+"""Stage 1 — harvest project IDs (+ core fields) from the EIB backend list API.
 
-The financed-projects list is rendered client-side, so the project links are not
-in the static HTML. Two routes:
+The portal grid is served by a JSON endpoint:
+    https://www.eib.org/provider-eib-plr/app/loans/list?...&pageNumber=N&itemPerPage=K
 
-  (A) Playwright (default): render the filtered list, read the /projects/all/<id>
-      links. Robust; selectors may need a one-time tune against the live DOM.
-  (B) API (preferred once found): if you paste the backend XHR URL template into
-      config -> harvest.api_url_template, we hit it directly (fast, stable).
+Each record carries exactly what we need — `id` (project number), `url`, `title`,
+`description`, `startDate` (signature date, epoch ms), an amount string, and structured
+country / region / sector tags. So this replaces the old Playwright approach entirely,
+and also supplies most of the spine fields next to the ID.
 
-Output: data/interim/ids_<slice>.csv  with columns
-        [project_id, url, name, country, sector, signature_date, amount_text]
+We page through the whole signed list once (cached), then filter to the configured
+slice (country + years) client-side — robust without guessing the site's filter params.
+
+Output: data/interim/ids_<slice>.csv
 """
 from __future__ import annotations
-import re
-import urllib.parse as up
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 
-LIST_URL = "https://www.eib.org/en/projects/loans/index.htm"
-PROJECT_RE = re.compile(r"/en/projects/all/(\d+)")
+LIST_URL = "https://www.eib.org/provider-eib-plr/app/loans/list"
+PROJECT_URL = "https://www.eib.org/en/projects/all/{}"
+
+# fixed query params (mirror the portal's own request; no status/country filter here —
+# we filter client-side below)
+BASE_PARAMS = (
+    "sortColumn=loanParts.loanPartStatus.statusDate&sortDir=desc"
+    "&pageable=true&language=EN&defaultLanguage=EN"
+    "&orLoanPartYearFrom=true&orLoanPartYearTo=true"
+    "&orCountries.region=true&orCountries=true&orSectors=true"
+)
 
 
-# ---------------------------------------------------------------------------
-# Route A — Playwright
-# ---------------------------------------------------------------------------
-def harvest_with_browser(country: str, years: list[int], sectors: list[str],
-                         headless: bool = True) -> pd.DataFrame:
-    from playwright.sync_api import sync_playwright
-
-    params = {"from": min(years), "to": max(years)}
-    # NOTE: the portal uses short codes for country/sector in the query string
-    # (e.g. ?sectors=EN). The simplest robust approach is to apply the filters in
-    # the UI after load; here we pass year range via URL and filter client-side.
-    url = LIST_URL + "?" + up.urlencode(params)
-
-    rows: list[dict] = []
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=headless)
-        page = browser.new_page()
-        page.goto(url, wait_until="networkidle", timeout=60_000)
-
-        # TODO(tune): set the country/sector filters via the on-page controls here
-        # if URL params don't take. Inspect the live DOM once and adjust selectors.
-        # e.g. page.select_option("#country-select", label=country)
-
-        # Paginate: click "next" until it disappears. Selector likely needs tuning.
-        while True:
-            page.wait_for_timeout(1500)
-            html = page.content()
-            for m in PROJECT_RE.finditer(html):
-                pid = m.group(1)
-                rows.append({"project_id": pid,
-                             "url": f"https://www.eib.org/en/projects/all/{pid}"})
-            nxt = page.query_selector("a[rel=next], .pagination-next, button[aria-label*=Next]")
-            if not nxt or not nxt.is_enabled():
-                break
-            nxt.click()
-        browser.close()
-
-    df = pd.DataFrame(rows).drop_duplicates("project_id").reset_index(drop=True)
-    return df
+def _tag(rec: dict, sub: str):
+    for t in (rec.get("primaryTags") or []):
+        if t.get("subType") == sub:
+            return t.get("label"), t.get("value")
+    return None, None
 
 
-# ---------------------------------------------------------------------------
-# Route B — backend JSON endpoint (fill api_url_template once you find it)
-# ---------------------------------------------------------------------------
-def harvest_with_api(fetcher, api_url_template: str, country: str,
-                     years: list[int], sectors: list[str]) -> pd.DataFrame:
-    """api_url_template may contain {page},{from},{to},{country},{sector}.
+def _epoch_to_date(ms):
+    if not ms:
+        return None
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).date().isoformat()
 
-    Inspect the real response shape in DevTools and adjust the field names below.
-    """
-    rows, page = [], 1
+
+def _amount(rec: dict):
+    for x in (rec.get("additionalInformation") or []):
+        if isinstance(x, str) and x.strip().startswith(("€", "$", "£")):
+            return x.strip()
+    return None
+
+
+def fetch_all(fetcher, item_per_page: int = 200) -> pd.DataFrame:
+    """Page through the full signed list, cached. Stops on the last (short) page."""
+    rows, page = [], 0
     while True:
-        url = api_url_template.format(page=page, **{"from": min(years), "to": max(years),
-                                                    "country": country,
-                                                    "sector": ",".join(sectors)})
-        data = fetcher.get_json(url)
-        items = data.get("results") or data.get("items") or data.get("data") or []
-        if not items:
+        url = f"{LIST_URL}?{BASE_PARAMS}&pageNumber={page}&itemPerPage={item_per_page}"
+        payload = fetcher.get_json(url)
+        data = payload.get("data") or []
+        if not data:
             break
-        for it in items:
-            pid = str(it.get("id") or it.get("projectNumber") or "")
+        for rec in data:
+            c_label, c_val = _tag(rec, "countries")
+            r_label, _ = _tag(rec, "regions")
+            s_label, s_val = _tag(rec, "sectors")
             rows.append({
-                "project_id": pid,
-                "url": f"https://www.eib.org/en/projects/all/{pid}",
-                "name": it.get("name") or it.get("title"),
-                "country": it.get("country"),
-                "sector": it.get("sector"),
-                "signature_date": it.get("signatureDate") or it.get("date"),
-                "amount_text": it.get("signedAmount") or it.get("amount"),
+                "project_id": rec.get("id"),
+                "url": PROJECT_URL.format(rec.get("url") or rec.get("id")),
+                "title": rec.get("title"),
+                "country": c_label, "country_code": c_val,
+                "region": r_label,
+                "sector": s_label, "sector_code": s_val,
+                "signature_date": _epoch_to_date(rec.get("startDate")),
+                "amount_text": _amount(rec),
+                "description": rec.get("description"),   # may be truncated; full text on the page
             })
+        print(f"[harvest_ids] page {page}: {len(data)} records")
+        if len(data) < item_per_page:
+            break
         page += 1
-    return pd.DataFrame(rows).drop_duplicates("project_id").reset_index(drop=True)
+    return pd.DataFrame(rows)
 
 
 def run(cfg, fetcher) -> Path:
     s = cfg["slice"]
-    tmpl = cfg["harvest"].get("api_url_template", "").strip()
-    if tmpl:
-        df = harvest_with_api(fetcher, tmpl, s["country"], s["years"], s["sectors"])
-    else:
-        df = harvest_with_browser(s["country"], s["years"], s["sectors"])
+    ipp = cfg.get("harvest", {}).get("item_per_page", 200)
+    df = fetch_all(fetcher, item_per_page=ipp)
+
+    # filter to the slice: country (by label or ISO code) + signature year
+    yrs = set(s["years"])
+    df["sig_year"] = pd.to_datetime(df["signature_date"], errors="coerce").dt.year
+    mask = (
+        df["country"].str.contains(s["country"], case=False, na=False)
+        | df["country_code"].fillna("").str.upper().eq(str(s["country"]).upper())
+    ) & df["sig_year"].isin(yrs)
+    if s.get("sectors"):
+        mask &= df["sector"].isin(s["sectors"])
+    out_df = df[mask].drop(columns=["sig_year"]).reset_index(drop=True)
 
     out = Path("data/interim") / f"ids_{s['country'].lower()}_{min(s['years'])}-{max(s['years'])}.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(out, index=False)
-    print(f"[harvest_ids] {len(df)} project IDs -> {out}")
+    out_df.to_csv(out, index=False)
+    print(f"[harvest_ids] {len(out_df)} projects in slice (of {len(df)} total) -> {out}")
     return out
