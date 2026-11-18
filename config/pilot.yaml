@@ -1,29 +1,29 @@
 # ---------------------------------------------------------------------------
-# Pilot scope. Keep the slice SMALL enough to hand-verify every project (~30-80).
-# The pilot's job is to prove the pipeline, not to be representative.
+# COMPLETE IRELAND PILOT — scrape all available years for Ireland.
 #
-# Recommended first slice: a small, English-language country with a mix of
-# direct (sited) and intermediated loans — easy to read, quick to validate.
+# Collection: pull the full history (years: "all") — cheap and complete; never
+# pre-truncate. Analysis window is a separate decision: the proposal frames
+# coverage as post-2000, bounded at the firm-outcome end by Orbis depth (~2008+).
+# To restrict collection instead, set  years: []  and  year_from: 2000.
 # ---------------------------------------------------------------------------
 
 slice:
-  country: "Ireland"        # portal country name; swap freely (e.g. "Portugal")
-  years: [2021, 2022, 2023, 2024]
-  sectors: []               # [] = all sectors; or e.g. ["Energy", "Transport"]
-  status: "financed"        # signed operations only
+  country: "Ireland"
+  years: "all"              # "all" | [2021,2022,...] | [] with year_from/year_to
+  year_from:                # e.g. 2000  (used only when years is [] or null)
+  year_to:
+  sectors: []               # [] = all sectors
+  status: "financed"        # signed operations
 
 paths:
-  spine_export: "data/raw/loanExport.xlsx"   # the portal export you downloaded
-  cas_benchmark: "data/raw/cas_detailed/"    # optional: annual CAS detailed lists for validation
+  spine_export: "data/raw/loanExport.xlsx"   # optional cross-check only
+  cas_dir: "data/raw"                         # CAS files for build_cas.py
 
 fetch:
-  contact: "research-scraper (LSE)"   # polite User-Agent label; add a contact if you wish
-  min_delay_seconds: 1.5              # be gentle with the portal
+  contact: "research-scraper (LSE)"
+  min_delay_seconds: 1.5    # be gentle with the portal
   max_retries: 4
-  cache_dir: "data/interim/cache"
+  cache_dir: "data/interim/cache"   # point to a local path outside OneDrive if syncing
 
 harvest:
-  # Leave api_url_template empty to use the Playwright (browser) harvester.
-  # Once you find the backend XHR in DevTools, paste its URL template here to
-  # use the faster API route (see harvest_ids.py).
-  api_url_template: ""
+  item_per_page: 200        # list-API page size

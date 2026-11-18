@@ -2,16 +2,16 @@
 
 The portal grid is served by a JSON endpoint:
     https://www.eib.org/provider-eib-plr/app/loans/list?...&pageNumber=N&itemPerPage=K
+Each record carries id (project number), url, title, description (truncated),
+startDate (epoch ms), amount, and primaryTags (country / region / sector).
 
-Each record carries exactly what we need — `id` (project number), `url`, `title`,
-`description`, `startDate` (signature date, epoch ms), an amount string, and structured
-country / region / sector tags. So this replaces the old Playwright approach entirely,
-and also supplies most of the spine fields next to the ID.
+We page the whole signed list once (cached), then filter to the configured slice
+(country, and optionally years) client-side.
 
-We page through the whole signed list once (cached), then filter to the configured
-slice (country + years) client-side — robust without guessing the site's filter params.
-
-Output: data/interim/ids_<slice>.csv
+Year selection in config -> slice:
+    years: "all"                -> every available year (no year filter)
+    years: [2021, 2022, 2023]   -> just those years
+    year_from: 2000             -> from 2000 onward (optionally with year_to)
 """
 from __future__ import annotations
 from datetime import datetime, timezone
@@ -21,9 +21,6 @@ import pandas as pd
 
 LIST_URL = "https://www.eib.org/provider-eib-plr/app/loans/list"
 PROJECT_URL = "https://www.eib.org/en/projects/all/{}"
-
-# fixed query params (mirror the portal's own request; no status/country filter here —
-# we filter client-side below)
 BASE_PARAMS = (
     "sortColumn=loanParts.loanPartStatus.statusDate&sortDir=desc"
     "&pageable=true&language=EN&defaultLanguage=EN"
@@ -83,24 +80,45 @@ def fetch_all(fetcher, item_per_page: int = 200) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def filter_slice(df: pd.DataFrame, s: dict) -> tuple[pd.DataFrame, str]:
+    """Apply country + year(+sector) filters. Returns (filtered_df, label)."""
+    df = df.copy()
+    df["sig_year"] = pd.to_datetime(df["signature_date"], errors="coerce").dt.year
+
+    mask = (df["country"].str.contains(s["country"], case=False, na=False)
+            | df["country_code"].fillna("").str.upper().eq(str(s["country"]).upper()))
+
+    years = s.get("years")
+    yr_from, yr_to = s.get("year_from"), s.get("year_to")
+    if isinstance(years, list) and years:
+        mask &= df["sig_year"].isin(set(years))
+        label = f"{min(years)}-{max(years)}"
+    elif yr_from or yr_to:
+        lo = int(yr_from) if yr_from else int(df["sig_year"].min())
+        hi = int(yr_to) if yr_to else int(df["sig_year"].max())
+        mask &= df["sig_year"].between(lo, hi)
+        label = f"{lo}-{hi}"
+    else:  # "all" / None / empty -> no year filter
+        label = "all"
+
+    if s.get("sectors"):
+        mask &= df["sector"].isin(s["sectors"])
+
+    out = df[mask].drop(columns=["sig_year"]).reset_index(drop=True)
+    return out, label
+
+
 def run(cfg, fetcher) -> Path:
     s = cfg["slice"]
     ipp = cfg.get("harvest", {}).get("item_per_page", 200)
     df = fetch_all(fetcher, item_per_page=ipp)
+    out_df, label = filter_slice(df, s)
 
-    # filter to the slice: country (by label or ISO code) + signature year
-    yrs = set(s["years"])
-    df["sig_year"] = pd.to_datetime(df["signature_date"], errors="coerce").dt.year
-    mask = (
-        df["country"].str.contains(s["country"], case=False, na=False)
-        | df["country_code"].fillna("").str.upper().eq(str(s["country"]).upper())
-    ) & df["sig_year"].isin(yrs)
-    if s.get("sectors"):
-        mask &= df["sector"].isin(s["sectors"])
-    out_df = df[mask].drop(columns=["sig_year"]).reset_index(drop=True)
-
-    out = Path("data/interim") / f"ids_{s['country'].lower()}_{min(s['years'])}-{max(s['years'])}.csv"
+    yrs = pd.to_datetime(out_df["signature_date"], errors="coerce").dt.year.dropna()
+    span = f"{int(yrs.min())}-{int(yrs.max())}" if len(yrs) else "n/a"
+    out = Path("data/interim") / f"ids_{s['country'].lower()}_{label}.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
     out_df.to_csv(out, index=False)
-    print(f"[harvest_ids] {len(out_df)} projects in slice (of {len(df)} total) -> {out}")
+    print(f"[harvest_ids] {len(out_df)} {s['country']} projects "
+          f"(span {span}; of {len(df)} total portfolio) -> {out}")
     return out
